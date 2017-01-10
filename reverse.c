@@ -4,6 +4,7 @@
 #include <linux/module.h>
 #include <linux/miscdevice.h>
 #include <linux/slab.h>
+#include <linux/sched.h>
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Nash Reilly <nrc.reilly@gmail.com");
@@ -52,6 +53,35 @@ static void buffer_free(struct buffer *buffer)
     kfree(buffer);
 };
 
+static inline char *reverse_word(char *start, char *end)
+{
+    char *orig_start = start;
+    char *tmp; 
+
+    for (; start < end; start++, end--) {
+        tmp    = *start;
+        *start = *end;
+        *end   = *tmp;
+    }
+
+    return orig_start;
+}
+
+static char *reverse_phrase(char *start, char *end)
+{
+    char *word_start = start;
+    char *word_end   = NULL;
+
+    while ((word_end = memchr(word_start, ' ', end - word_start)) != NULL) {
+        reverse_word(word_start, word_end - 1);
+        word_start = word_start + 1;
+    }
+
+    reverse_word(word_start, end);
+
+    return reverse_word(start, end);
+}
+
 static int reverse_open(struct inode *inode, struct file *file)
 {
     struct buffer *buf;
@@ -69,10 +99,91 @@ out:
     return err;
 }
 
+static int reverse_close(struct inode *inode, struct file *file)
+{
+    struct buffer *buf = file->private_data;
+
+    buffer_free(buf);
+
+    return 0;
+}
+
+static ssize_t reverse_read(struct file *file, char __user *out, 
+                            size_t size, loff_t *off)
+{
+    struct buffer *buf = file->private_data;
+    ssize_t result;
+
+    while (buf->read_ptr == buf->end) {
+        if (file->f_flags & O_NONBLOCK) {
+            result = -EAGAIN;
+            goto out;
+        }
+
+        if (wait_event_interruptible(buf->read_queue,
+                                     buf->read_ptr != buf->end)) {
+            result = -ERESTARTSYS;
+            goto out;
+        }
+    }
+
+    size = min(size, (size_t)(buf->end - buf->read_ptr));
+    if (copy_to_user(out, buf->read_ptr, size)) {
+        result = -EFAULT;
+        goto out;
+    }
+
+    buf->read_ptr += size;
+    result = size;
+
+out:
+    return result;
+}
+
+static ssize_t reverse_write(struct file *file, const char __user *in, 
+                             size_t size, loff_t *off) 
+{
+    struct buffer *buf = file->private_data;
+    ssize_t result;
+
+    if (size > buffer_size) {
+        result = -EFBIG;
+        goto out;
+    }
+
+    if (mutex_lock_interruptible(&buf->lock)) {
+        result = -ERESTARTSYS;
+        goto out;
+    }
+
+    if (copy_from_user(buf->data, in, size)) {
+        result = -EFAULT;
+        goto out_unlock;
+    }
+
+    buf->end = buf->data + size;
+    buf->read_ptr = buf->data;
+
+    if (buf->end > buf->data)
+        reverse_phrase(buf->data, buf->end - 1);
+
+    wake_up_interruptible(&buf->read_queue);
+
+    result = size;
+
+out_unlock:
+    mutex_unlock(&buf->lock);
+out:
+    return result;
+}
+
 static struct file_operations reverse_fops = {
-    .owner  = THIS_MODULE,
-    .open   = reverse_open,
-    .llseek = noop_llseek
+    .owner    = THIS_MODULE,
+    .open     = reverse_open,
+    .read     = reverse_read,
+    .write    = reverse_write,
+    .release  = reverse_close,
+    .llseek   = noop_llseek
 };
 
 static struct miscdevice reverse_misc_device = {
