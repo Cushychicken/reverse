@@ -1,10 +1,12 @@
 #include <linux/init.h>
-#include <linux/fs.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
+
+#include <linux/fs.h>
 #include <linux/miscdevice.h>
 #include <linux/slab.h>
 #include <linux/sched.h>
+#include <linux/uaccess.h>
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Nash Reilly <nrc.reilly@gmail.com");
@@ -25,6 +27,7 @@ struct buffer {
 static struct buffer *buffer_alloc(unsigned long size)
 {
     struct buffer *buf;
+
     buf = kzalloc(sizeof(*buf), GFP_KERNEL);
     if (unlikely(!buf))
         goto out;
@@ -56,12 +59,12 @@ static void buffer_free(struct buffer *buffer)
 static inline char *reverse_word(char *start, char *end)
 {
     char *orig_start = start;
-    char *tmp; 
+    char tmp; 
 
     for (; start < end; start++, end--) {
         tmp    = *start;
         *start = *end;
-        *end   = *tmp;
+        *end   = tmp;
     }
 
     return orig_start;
@@ -74,7 +77,8 @@ static char *reverse_phrase(char *start, char *end)
 
     while ((word_end = memchr(word_start, ' ', end - word_start)) != NULL) {
         reverse_word(word_start, word_end - 1);
-        word_start = word_start + 1;
+        word_start = word_end + 1;
+        printk(KERN_DEBUG "Reverse: '%s'\n", start);
     }
 
     reverse_word(word_start, end);
